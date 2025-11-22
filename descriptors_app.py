@@ -279,4 +279,4 @@ def show_library_status():
     st.sidebar.write(f"{status_icon[PY3DMOL_AVAILABLE]} py3Dmol")
 
 # Mostrar estado de librerías
-show_library_status()
+#show_library_status()
