@@ -1,15 +1,68 @@
 import streamlit as st
 import pandas as pd
-from rdkit import Chem
-from rdkit.Chem import Draw
-import py3Dmol
 import streamlit.components.v1 as components
 import tempfile
+
+# Importar RDKit con manejo de errores
+try:
+    from rdkit import Chem
+    from rdkit.Chem import AllChem
+    RDKIT_AVAILABLE = True
+except ImportError as e:
+    st.error(f"Error importing RDKit: {e}")
+    RDKIT_AVAILABLE = False
+
+# Importar Draw por separado con manejo de errores
+try:
+    from rdkit.Chem import Draw
+    DRAW_AVAILABLE = True
+except ImportError:
+    DRAW_AVAILABLE = False
+
+# Importar py3Dmol con manejo de errores
+try:
+    import py3Dmol
+    PY3DMOL_AVAILABLE = True
+except ImportError:
+    PY3DMOL_AVAILABLE = False
+
+def mol_to_3d_view(mol, width=600, height=600):
+    """Convierte molécula RDKit a visualización 3D con py3Dmol"""
+    if not PY3DMOL_AVAILABLE or mol is None:
+        return None
+    
+    try:
+        # Añadir hidrógenos y generar conformación 3D
+        mol_with_h = Chem.AddHs(mol)
+        AllChem.EmbedMolecule(mol_with_h, AllChem.ETKDGv3())
+        
+        # Convertir a formato MOL
+        mol_block = Chem.MolToMolBlock(mol_with_h)
+        
+        # Crear visualización 3D
+        view = py3Dmol.view(width=width, height=height)
+        view.addModel(mol_block, "mol")
+        view.setStyle({"stick": {}})
+        view.setBackgroundColor("white")
+        view.zoomTo()
+        
+        return view
+    except Exception as e:
+        st.error(f"Error generating 3D view: {e}")
+        return None
 
 def show_descriptors_page():
     # --- Título ---
     st.title("🔬 Visualizador de Descriptores Moleculares")
     st.markdown("**Creado por:** Antonio Elias Sánchez Soto")
+
+    # Verificar disponibilidad de librerías
+    if not RDKIT_AVAILABLE:
+        st.error("""
+        ❌ RDKit no está disponible en este entorno. 
+        Esta aplicación requiere RDKit para funcionar correctamente.
+        """)
+        return
 
     # --- Guía de usuario ---
     with st.expander("📖 Guía de Usuario", expanded=False):
@@ -63,24 +116,33 @@ def show_descriptors_page():
 
     # Subir molécula
     mol_file = st.sidebar.file_uploader("Sube tu archivo .mol", type=["mol"])
+    mol = None
+    
     if mol_file is not None:
-        # Guardar archivo temporalmente
-        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".mol") as f:
-            f.write(mol_file.getvalue().decode("utf-8"))
-            temp_mol_path = f.name
-        mol = Chem.MolFromMolFile(temp_mol_path, removeHs=False, sanitize=True)
-        if mol is None:
-            st.sidebar.error("No se pudo cargar la molécula.")
+        try:
+            # Leer directamente desde el archivo subido
+            mol_data = mol_file.getvalue().decode("utf-8")
+            mol = Chem.MolFromMolBlock(mol_data, removeHs=False, sanitize=True)
+            
+            if mol is None:
+                # Intentar alternativas si falla
+                mol = Chem.MolFromMolFile(mol_file, removeHs=False, sanitize=True)
+                
+            if mol is None:
+                st.sidebar.error("❌ No se pudo cargar la molécula. Verifique el formato del archivo.")
+            else:
+                st.sidebar.success("✅ Molécula cargada correctamente.")
+        except Exception as e:
+            st.sidebar.error(f"❌ Error al cargar la molécula: {e}")
             mol = None
-        else:
-            st.sidebar.success("✅ Molécula cargada.")
     else:
-        mol = None
         st.sidebar.warning("⚠️ Sube un archivo .mol")
 
     # Subir múltiples archivos de descriptores
     desc_files = st.sidebar.file_uploader(
-        "Sube tus archivos de descriptores (.csv o .txt)", type=["csv", "txt"], accept_multiple_files=True
+        "Sube tus archivos de descriptores (.csv o .txt)", 
+        type=["csv", "txt"], 
+        accept_multiple_files=True
     )
 
     # Diccionario para almacenar DataFrames
@@ -88,68 +150,60 @@ def show_descriptors_page():
 
     if desc_files:
         for file in desc_files:
-            # Detectar tipo de archivo
-            if file.name.endswith(".txt"):
-                # Asumir e-Dragon
-                try:
+            try:
+                # Detectar tipo de archivo
+                if file.name.endswith(".txt"):
+                    # Asumir e-Dragon
                     df_temp = pd.read_csv(file, sep="\t", skiprows=2)
                     df_temp.columns = df_temp.columns.str.strip()
                     df_temp.replace(-999, pd.NA, inplace=True)
                     df_temp.dropna(axis=1, how='all', inplace=True)
                     fuente_temp = "e-Dragon"
-                except Exception:
-                    st.sidebar.error(f"No se pudo leer {file.name} como e-Dragon.")
-                    continue
-            elif file.name.endswith(".csv"):
-                # Asumir PaDEL o padelpy
-                try:
+                elif file.name.endswith(".csv"):
+                    # Asumir PaDEL o padelpy
                     df_temp = pd.read_csv(file, index_col=0)
                     df_temp.replace(-999, pd.NA, inplace=True)
                     if 'Name' in df_temp.columns:
                         fuente_temp = "padelpy"
                     else:
                         fuente_temp = "PaDEL"
-                except Exception:
-                    st.sidebar.error(f"No se pudo leer {file.name} como CSV.")
+                else:
                     continue
-            else:
+
+                # Almacenar en el diccionario
+                descriptors_data[file.name] = {"df": df_temp, "fuente": fuente_temp}
+                st.sidebar.success(f"✅ {file.name} ({fuente_temp}) cargado.")
+                
+            except Exception as e:
+                st.sidebar.error(f"❌ Error al cargar {file.name}: {e}")
                 continue
 
-            # Almacenar en el diccionario
-            descriptors_data[file.name] = {"df": df_temp, "fuente": fuente_temp}
-            st.sidebar.success(f"✅ {file.name} ({fuente_temp}) cargado.")
+    # Verificar si se cargó algún archivo de descriptores
+    if descriptors_data:
+        # Selector de archivo de descriptores
+        selected_file = st.sidebar.selectbox(
+            "Selecciona archivo de descriptores para visualizar",
+            list(descriptors_data.keys())
+        )
 
-        # --- Corrección aquí: Línea `if descriptors_` eliminada ---
-        # Verificamos si se cargó algún archivo de descriptores
-        if descriptors_data: 
-            # Selector de archivo de descriptores
-            selected_file = st.sidebar.selectbox(
-                "Selecciona archivo de descriptores para visualizar",
-                list(descriptors_data.keys())
-            )
-
-            # Obtener el DataFrame y la fuente del archivo seleccionado
-            df = descriptors_data[selected_file]["df"]
-            fuente = descriptors_data[selected_file]["fuente"]
-        else:
-            df = pd.DataFrame()
-            fuente = None
-            st.sidebar.error("❌ No se pudo cargar ningún archivo de descriptores.")
-            st.stop()
+        # Obtener el DataFrame y la fuente del archivo seleccionado
+        df = descriptors_data[selected_file]["df"]
+        fuente = descriptors_data[selected_file]["fuente"]
     else:
         df = pd.DataFrame()
         fuente = None
-        st.sidebar.warning("⚠️ Sube al menos un archivo de descriptores")
+        if desc_files:  # Solo mostrar advertencia si se subieron archivos pero no se pudieron cargar
+            st.sidebar.error("❌ No se pudo cargar ningún archivo de descriptores.")
 
     # --- Validar carga ---
     if df.empty or mol is None:
         st.warning("⚠️ Sube tanto el archivo .mol como al menos un archivo de descriptores para continuar.")
-        st.stop()
+        return
 
     # --- Sidebar ---
     st.sidebar.header("🔍 Filtros")
 
-    # Seleccionar molécula (por ejemplo, en e-Dragon tienes 1 y 2)
+    # Seleccionar molécula
     mol_id = st.sidebar.selectbox("Selecciona molécula", df.index)
     df_filtered = df.loc[[mol_id]].copy()
 
@@ -168,6 +222,8 @@ def show_descriptors_page():
         descriptors_series = df_filtered.T
         descriptors_series.columns = ['Valor']
         st.dataframe(descriptors_series)
+        
+        # Botón de descarga
         st.download_button(
             label="📥 Descargar descriptores",
             data=descriptors_series.to_csv().encode("utf-8"),
@@ -177,21 +233,50 @@ def show_descriptors_page():
 
     with tab2:
         st.subheader("Estructura 2D de la molécula")
-        if mol:
-            img = Draw.MolToImage(mol, size=(600, 600))
-            st.image(img, caption="Estructura 2D", use_container_width=True)
+        if mol and DRAW_AVAILABLE:
+            try:
+                img = Draw.MolToImage(mol, size=(600, 600))
+                st.image(img, caption="Estructura 2D", use_container_width=True)
+            except Exception as e:
+                st.error(f"❌ Error al generar imagen 2D: {e}")
+                st.info("La visualización 2D no está disponible en este entorno.")
         else:
-            st.warning("No hay molécula cargada para visualizar.")
+            if not DRAW_AVAILABLE:
+                st.warning("🔧 La visualización 2D no está disponible en este entorno.")
+            else:
+                st.warning("⚠️ No hay molécula cargada para visualizar.")
 
     with tab3:
         st.subheader("Estructura 3D de la molécula")
-        if mol:
-            mol_block = Chem.MolToMolBlock(mol)
-            view = py3Dmol.view(width=600, height=600)
-            view.addModel(mol_block, "mol")
-            view.setStyle({"stick": {}})
-            view.setBackgroundColor("white")
-            view.zoomTo()
-            st.components.v1.html(view._make_html(), height=600, scrolling=False)
+        if mol and PY3DMOL_AVAILABLE:
+            try:
+                view = mol_to_3d_view(mol, width=600, height=600)
+                if view:
+                    html_content = view._make_html()
+                    components.html(html_content, width=600, height=600, scrolling=False)
+                else:
+                    st.warning("❌ No se pudo generar la visualización 3D.")
+            except Exception as e:
+                st.error(f"❌ Error al generar visualización 3D: {e}")
         else:
-            st.warning("No hay molécula cargada para visualizar.")
+            if not PY3DMOL_AVAILABLE:
+                st.warning("🔧 La visualización 3D no está disponible. Instala py3dmol.")
+            else:
+                st.warning("⚠️ No hay molécula cargada para visualizar.")
+
+# Información del estado de las librerías
+def show_library_status():
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🔧 Estado de Librerías")
+    
+    status_icon = {
+        True: "✅",
+        False: "❌"
+    }
+    
+    st.sidebar.write(f"{status_icon[RDKIT_AVAILABLE]} RDKit")
+    st.sidebar.write(f"{status_icon[DRAW_AVAILABLE]} RDKit Draw")
+    st.sidebar.write(f"{status_icon[PY3DMOL_AVAILABLE]} py3Dmol")
+
+# Mostrar estado de librerías
+show_library_status()
